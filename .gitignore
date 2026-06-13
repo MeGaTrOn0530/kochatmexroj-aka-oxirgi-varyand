@@ -1,0 +1,18 @@
+node_modules
+dist
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Local Netlify folder
+.netlify
+
+# Misc
+*.log
+cat
+1.png
+test qilish.txt
+platform.txt

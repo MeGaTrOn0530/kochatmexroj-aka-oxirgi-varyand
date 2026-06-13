@@ -1,0 +1,13 @@
+[build]
+  command = "pnpm run build:client"
+  publish = "dist/public"
+
+[build.environment]
+  NODE_VERSION = "20"
+  PNPM_VERSION = "10"
+  VITE_API_URL = "https://tyutorkpi.sies.uz/kochat"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
