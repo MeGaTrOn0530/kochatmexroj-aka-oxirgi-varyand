@@ -159,10 +159,10 @@ router.get(
       SELECT gt.*,
         fl.name AS from_location_name,
         tl.name AS to_location_name,
-        u1.name AS created_by_name,
-        u2.name AS sender_confirmed_by_name,
-        u3.name AS head_confirmed_by_name,
-        u4.name AS receiver_confirmed_by_name,
+        u1.full_name AS created_by_name,
+        u2.full_name AS sender_confirmed_by_name,
+        u3.full_name AS head_confirmed_by_name,
+        u4.full_name AS receiver_confirmed_by_name,
         rt.name AS rootstock_type_name
       FROM greenhouse_transfers gt
       LEFT JOIN locations fl ON fl.id = gt.from_location_id
