@@ -20,7 +20,7 @@ import {
   printReceiptDocument,
 } from "@/lib/print-documents";
 import { trpc } from "@/lib/trpc";
-import { Download, FileText, Plus, Printer, ShoppingCart } from "lucide-react";
+import { Download, FileText, Plus, Printer, ShoppingCart, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -44,6 +44,7 @@ const statusLabel = {
   partial: "Qisman",
   fulfilled: "To'liq",
   shortage: "Yetishmaydi",
+  agranom_confirmed: "Berildi (tasdiqlash kerak)",
   completed: "Yakunlangan",
   cancelled: "Bekor qilingan",
 };
@@ -216,7 +217,11 @@ export default function OrdersPage() {
   const { user } = useAuth();
   const utils = trpc.useUtils();
   const isAgranom = user?.role === "agranom";
-  const canCreateOrder = ["admin", "agranom", "bosh_agranom"].includes(user?.role || "");
+  const isBugalter = user?.role === "bugalter";
+  // Jomboy padvo (is_source=1): agranom o'z lokatsiyasida buyurtma yarata oladi (batch forma)
+  const isSourceAgranom = isAgranom && Boolean(user?.locationIsSource);
+  // Bugalter endi buyurtma yaratadi; agranom faqat "berdim" tasdiqlaydi (manba lokatsiyasidan tashqari)
+  const canCreateOrder = ["admin", "bugalter", "bosh_agranom"].includes(user?.role || "") || isSourceAgranom;
   const canViewOrders = ["admin", "agranom", "bosh_agranom", "bugalter"].includes(user?.role || "");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isGhDialogOpen, setIsGhDialogOpen] = useState(false);
@@ -245,17 +250,18 @@ export default function OrdersPage() {
   const [partialDeliverQty, setPartialDeliverQty] = useState("");
 
   const { data: batches } = trpc.seedlings.getBatches.useQuery(undefined, {
-    enabled: canCreateOrder && !isAgranom,
+    enabled: canCreateOrder,
   });
   const { data: locations } = trpc.locations.getAll.useQuery(undefined, {
-    enabled: canCreateOrder && !isAgranom,
+    enabled: canCreateOrder,
   });
   const { data: orders } = trpc.orders.getAll.useQuery(undefined, {
     enabled: canViewOrders,
   });
+  // Bugalter ham tayyor ko'chatlarni ko'rishi uchun
   const { data: ghVarietyStock } = trpc.greenhouse.getVarietyStock.useQuery(
     user?.locationId as number,
-    { enabled: isAgranom && !!user?.locationId }
+    { enabled: (isAgranom || isBugalter) && !!user?.locationId }
   );
 
   const selectedBatch = useMemo(
@@ -339,6 +345,16 @@ export default function OrdersPage() {
     },
   });
 
+  const agranomConfirmMutation = trpc.orders.agranomConfirm.useMutation({
+    onSuccess: async () => {
+      toast.success("'Berdim' tasdiqlandi. Bosh agronom tasdiqlashi kutilmoqda.");
+      await utils.orders.getAll.invalidate();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Tasdiqlab bo'lmadi");
+    },
+  });
+
   const sellOrderMutation = trpc.orders.sellOrder.useMutation({
     onSuccess: async () => {
       toast.success("Buyurtma sotilgan deb tasdiqlandi");
@@ -358,6 +374,16 @@ export default function OrdersPage() {
     },
   });
   const orderDetailMutation = trpc.orders.getDetail.useMutation();
+
+  const deleteOrderMutation = trpc.orders.deleteOrder.useMutation({
+    onSuccess: async () => {
+      toast.success("Buyurtma o'chirildi");
+      await utils.orders.getAll.invalidate();
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "O'chirib bo'lmadi");
+    },
+  });
 
   const handleCreateOrder = () => {
     if (!canCreateOrder) {
@@ -406,10 +432,17 @@ export default function OrdersPage() {
     } as any);
   };
 
-  const canSellOrder = (order: any) =>
-    ["new", "partial", "shortage"].includes(order.status) &&
+  // Agranom "Berdim" tugmasi: new yoki partial statusda, o'z lokatsiyasi
+  const canAgranomConfirm = (order: any) =>
+    ["new", "partial"].includes(order.status) &&
     (user?.role === "admin" ||
       (user?.role === "agranom" && Number(user.locationId) === Number(order.locationId)));
+
+  // Bosh agronom / admin yakunlash (miqdor kamayadi)
+  const canSellOrder = (order: any) =>
+    ["new", "partial", "shortage", "agranom_confirmed"].includes(order.status) &&
+    (user?.role === "admin" || user?.role === "bosh_agranom" ||
+      (user?.role === "agranom" && Number(user.locationId) === Number(order.locationId) && order.status !== "agranom_confirmed"));
 
   const handleOrderReceipt = (orderId: number, action: "print" | "download") => {
     setReceiptLoadingOrderId(orderId);
@@ -476,7 +509,7 @@ export default function OrdersPage() {
           </div>
 
           {canCreateOrder ? (
-            isAgranom ? (
+            isAgranom && !isSourceAgranom ? (
               <Dialog open={isGhDialogOpen} onOpenChange={setIsGhDialogOpen}>
                 <DialogTrigger asChild>
                   <Button className="btn-primary gap-2">
@@ -1033,14 +1066,43 @@ export default function OrdersPage() {
                             Qisman berish ({order.shortageQuantity} ta bron)
                           </Button>
                         )}
-                        {canSellOrder(order) && order.status !== "partial" ? (
+                        {/* Agranom: "Berdim" tugmasi */}
+                        {canAgranomConfirm(order) && user?.role === "agranom" && order.status !== "partial" && (
+                          <Button
+                            variant="outline"
+                            className="border-blue-400 text-blue-700 hover:bg-blue-50"
+                            onClick={() => agranomConfirmMutation.mutate(order.id)}
+                            disabled={agranomConfirmMutation.isPending}
+                          >
+                            {agranomConfirmMutation.isPending ? "Tasdiqlanmoqda..." : "✓ Berdim"}
+                          </Button>
+                        )}
+                        {/* Bosh agronom / Admin: yakunlash (miqdor kamayadi) */}
+                        {canSellOrder(order) && order.status !== "partial" && user?.role !== "agranom" && (
                           <Button
                             onClick={() => sellOrderMutation.mutate({ orderId: order.id })}
                             disabled={sellOrderMutation.isPending}
                           >
-                            {sellOrderMutation.isPending ? "Tasdiqlanmoqda..." : "Sotilgan deb tasdiqlash"}
+                            {sellOrderMutation.isPending ? "Tasdiqlanmoqda..." :
+                              order.status === "agranom_confirmed" ? "Tasdiqlash (miqdor kamayadi)" : "Sotilgan deb tasdiqlash"}
                           </Button>
-                        ) : null}
+                        )}
+                        {user?.role === "admin" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="gap-2 border-red-300 text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20"
+                            disabled={deleteOrderMutation.isPending}
+                            onClick={() => {
+                              if (window.confirm(`"${order.orderNumber}" buyurtmasini o'chirishni tasdiqlaysizmi?`)) {
+                                deleteOrderMutation.mutate(order.id);
+                              }
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            O'chirish
+                          </Button>
+                        )}
                       </div>
                     </div>
                   </div>

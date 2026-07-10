@@ -159,32 +159,118 @@ export default function AdminDashboard() {
         </div>
 
         {/* Teplitsa bosqichlari umumiy holati */}
-        <Card className="card-elegant border-green-200">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-green-700">Teplitsa bosqichlari (umumiy)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-4 gap-3">
-              <div className="text-center">
-                <div className="text-xs text-muted-foreground">Kasetada</div>
-                <div className="text-xl font-bold text-yellow-600">{(stats as any)?.greenhouseCassette || 0}</div>
+        <Card className="card-elegant overflow-hidden border-0 shadow-md">
+          {/* Gradient header */}
+          <div className="bg-gradient-to-r from-emerald-600 via-green-500 to-teal-500 px-6 py-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-white font-bold text-base tracking-tight">Teplitsa bosqichlari</h2>
+                <p className="text-emerald-100 text-xs mt-0.5">Barcha teplitsalardagi ko'chatlar holati</p>
               </div>
-              <div className="text-center">
-                <div className="text-xs text-muted-foreground">Payvantlash</div>
-                <div className="text-xl font-bold text-blue-600">{(stats as any)?.greenhouseGrafting || 0}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-xs text-muted-foreground">Payvantlangan</div>
-                <div className="text-xl font-bold text-green-600">{(stats as any)?.greenhouseGrafted || 0}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-xs text-muted-foreground">Tayyor</div>
-                <div className="text-xl font-bold text-emerald-600">{(stats as any)?.greenhouseReady || 0}</div>
+              <div className="text-right">
+                <div className="text-emerald-100 text-[11px]">Jami</div>
+                <div className="text-white text-2xl font-bold">{((stats as any)?.greenhouseTotal || 0).toLocaleString()} ta</div>
               </div>
             </div>
-            <div className="mt-2 text-xs text-center text-muted-foreground">
-              Jami teplitsalarda: <span className="font-bold text-foreground">{(stats as any)?.greenhouseTotal || 0}</span> ta
-            </div>
+          </div>
+
+          {/* Stage summary strip */}
+          <div className="grid grid-cols-4 divide-x divide-border/40 border-b border-border/40">
+            {[
+              { label: "Kasetada", value: (stats as any)?.greenhouseCassette, textColor: "text-amber-600", bg: "bg-amber-50 dark:bg-amber-950/20" },
+              { label: "Payvantlash", value: (stats as any)?.greenhouseGrafting, textColor: "text-blue-600", bg: "bg-blue-50 dark:bg-blue-950/20" },
+              { label: "Payvantlangan", value: (stats as any)?.greenhouseGrafted, textColor: "text-violet-600", bg: "bg-violet-50 dark:bg-violet-950/20" },
+              { label: "Tayyor", value: (stats as any)?.greenhouseReady, textColor: "text-emerald-600", bg: "bg-emerald-50 dark:bg-emerald-950/20" },
+            ].map(({ label, value, textColor, bg }) => (
+              <div key={label} className={`${bg} px-3 py-3 text-center`}>
+                <div className="text-[11px] text-muted-foreground mb-1">{label}</div>
+                <div className={`text-xl font-bold ${textColor}`}>{(value || 0).toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+
+          <CardContent className="p-5 space-y-5">
+            {/* Per-greenhouse breakdown — only show locations with data */}
+            {(() => {
+              const activeLocations = ((stats as any)?.locationStageStock as Array<{ locationId: number; locationName: string; stages: Record<string, number> }> || [])
+                .filter(loc => Object.values(loc.stages).reduce((s, v) => s + v, 0) > 0);
+              if (activeLocations.length === 0) return null;
+              return (
+                <div>
+                  <div className="text-xs font-bold text-muted-foreground uppercase tracking-wider mb-3">Teplitsalar</div>
+                  <div className="space-y-2">
+                    {activeLocations.map((loc) => {
+                      const total = Object.values(loc.stages).reduce((s, v) => s + v, 0);
+                      const stages = [
+                        { key: "cassette", label: "Kaset", pillCls: "bg-amber-500 text-white" },
+                        { key: "grafting", label: "Payvantlash", pillCls: "bg-blue-500 text-white" },
+                        { key: "grafted", label: "Payvantlangan", pillCls: "bg-violet-500 text-white" },
+                        { key: "ready", label: "Tayyor", pillCls: "bg-emerald-500 text-white" },
+                      ].filter(s => (loc.stages[s.key] || 0) > 0);
+                      return (
+                        <div key={loc.locationId} className="flex items-center gap-4 rounded-xl border border-border/50 bg-muted/20 px-4 py-3">
+                          <span className="text-sm font-semibold min-w-0 flex-1">{loc.locationName}</span>
+                          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+                            {stages.map(({ key, label, pillCls }) => (
+                              <span key={key} className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${pillCls}`}>
+                                {label} {(loc.stages[key] || 0).toLocaleString()}
+                              </span>
+                            ))}
+                            <span className="text-sm font-bold text-foreground ml-1">{total.toLocaleString()} ta</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Padvo / source location batch inventory */}
+            {((stats as any)?.sourceLocationInventory as Array<{ locationId: number; locationName: string; batches: Array<{ batchId: number; batchCode: string; varietyName: string; seedlingTypeName: string; stage: string; quantity: number }> }> || []).map((loc) => {
+              const total = loc.batches.reduce((s, b) => s + b.quantity, 0);
+              const maxQty = Math.max(...loc.batches.map(b => b.quantity), 1);
+              return (
+                <div key={loc.locationId} className="rounded-2xl border border-blue-200 dark:border-blue-800 overflow-hidden">
+                  {/* Padvo header */}
+                  <div className="flex items-center justify-between bg-gradient-to-r from-blue-600 to-indigo-500 px-5 py-4">
+                    <div className="flex items-center gap-3">
+                      <span className="text-white font-bold text-base">{loc.locationName}</span>
+                      <span className="rounded-full bg-white/20 px-2.5 py-1 text-xs font-bold text-white uppercase tracking-wide">Padvo</span>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-blue-100 text-xs">{loc.batches.length} ta partiya</div>
+                      <div className="text-white font-bold text-base">{total.toLocaleString()} ta</div>
+                    </div>
+                  </div>
+                  {/* Batch list — show all */}
+                  <div className="bg-blue-50/40 dark:bg-blue-950/10 p-4 space-y-2">
+                    {loc.batches.map((b) => {
+                      const pct = Math.round((b.quantity / maxQty) * 100);
+                      const displayName = [b.varietyName, b.seedlingTypeName].filter(Boolean).join(" · ") || null;
+                      return (
+                        <div key={b.batchId} className="flex items-center gap-3 rounded-xl bg-white dark:bg-background border border-blue-100 dark:border-blue-900 px-4 py-3 shadow-sm">
+                          <span className="font-mono text-sm font-bold text-blue-800 dark:text-blue-300 bg-blue-100 dark:bg-blue-900/50 rounded-lg px-2.5 py-1.5 shrink-0 min-w-[60px] text-center">
+                            {b.batchCode}
+                          </span>
+                          <span className="text-sm text-muted-foreground truncate flex-1">
+                            {displayName ?? <span className="italic opacity-50">Nav ko'rsatilmagan</span>}
+                          </span>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <div className="w-24 h-2 rounded-full bg-blue-100 dark:bg-blue-900 overflow-hidden">
+                              <div className="h-full rounded-full bg-blue-400 transition-all" style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className="text-sm font-bold text-blue-700 dark:text-blue-300 w-[72px] text-right tabular-nums">
+                              {b.quantity.toLocaleString()} ta
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
 

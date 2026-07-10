@@ -296,13 +296,16 @@ function normalizeCustomerProduct(item: any) {
 }
 
 function normalizeTransfer(transfer: any) {
-  const workflowStatus =
-    transfer?.receiver_confirmed || transfer?.receiver_confirmed_by
+  // Yangi tartib: sender → receiver → head (so'nggi)
+  const isRejected = transfer?.status === "rejected";
+  const workflowStatus = isRejected
+    ? "rejected"
+    : transfer?.head_confirmed || transfer?.head_confirmed_by
       ? "completed"
-      : transfer?.head_confirmed || transfer?.head_confirmed_by
-        ? "pending_receiver"
+      : transfer?.receiver_confirmed || transfer?.receiver_confirmed_by
+        ? "pending_head"
         : transfer?.sender_confirmed || transfer?.sender_confirmed_by
-          ? "pending_head"
+          ? "pending_receiver"
           : "pending_sender";
 
   return {
@@ -931,6 +934,12 @@ export const trpc: any = {
         body: JSON.stringify({}),
       })
     ),
+    rejectTransfer: makeMutationHook(async (input: { transferId: number; reason?: string }) =>
+      apiFetch(`/api/transfers/${input.transferId}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reason: input.reason }),
+      })
+    ),
   },
   orders: {
     getAll: makeQueryHook(["orders", "getAll"], async () => {
@@ -1006,6 +1015,12 @@ export const trpc: any = {
         }),
       });
     }),
+    agranomConfirm: makeMutationHook(async (orderId: number) =>
+      apiFetch(`/api/orders/${orderId}/agranom-confirm`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      })
+    ),
     sellOrder: makeMutationHook(async (input: { orderId: number; notes?: string }) =>
       apiFetch(`/api/orders/${input.orderId}/sell`, {
         method: "POST",
@@ -1021,6 +1036,9 @@ export const trpc: any = {
             notes: input.notes || undefined,
           }),
         })
+    ),
+    deleteOrder: makeMutationHook(async (orderId: number) =>
+      apiFetch(`/api/orders/${orderId}`, { method: "DELETE" })
     ),
     getOrdersSummary: makeQueryHook(
       ["orders", "getOrdersSummary"],
@@ -1193,6 +1211,61 @@ export const trpc: any = {
     deleteLog: makeMutationHook(async (input: { locationId: number; logId: number }) =>
       apiFetch(`/api/greenhouse/${input.locationId}/log/${input.logId}`, { method: "DELETE" })
     ),
+    stageTransfer: makeMutationHook(async (input: {
+      locationId: number;
+      toLocationId: number;
+      fromStage: string;
+      toStage?: string;
+      quantity: number;
+      fromRootstockTypeId?: number;
+      notes?: string;
+      actionDate?: string;
+    }) =>
+      apiFetch(`/api/greenhouse/${input.locationId}/stage-transfer`, {
+        method: "POST",
+        body: JSON.stringify({
+          toLocationId: input.toLocationId,
+          fromStage: input.fromStage,
+          toStage: input.toStage,
+          quantity: input.quantity,
+          fromRootstockTypeId: input.fromRootstockTypeId,
+          notes: input.notes,
+          actionDate: input.actionDate,
+        }),
+      })
+    ),
+    getGreenhouseTransfers: makeQueryHook(["greenhouse", "transfers"], async () => {
+      const rows = await apiFetch("/api/greenhouse/transfers");
+      return (rows || []).map((r: any) => ({
+        id: r.id,
+        transferCode: r.transfer_code,
+        fromLocationId: r.from_location_id,
+        toLocationId: r.to_location_id,
+        fromLocationName: r.from_location_name,
+        toLocationName: r.to_location_name,
+        fromStage: r.from_stage,
+        toStage: r.to_stage,
+        quantity: r.quantity,
+        rootstockTypeName: r.rootstock_type_name,
+        transferDate: r.transfer_date,
+        note: r.note,
+        status: r.status,
+        createdByName: r.created_by_name,
+        senderConfirmedBy: r.sender_confirmed_by,
+        senderConfirmedByName: r.sender_confirmed_by_name,
+        headConfirmedBy: r.head_confirmed_by,
+        headConfirmedByName: r.head_confirmed_by_name,
+        receiverConfirmedBy: r.receiver_confirmed_by,
+        receiverConfirmedByName: r.receiver_confirmed_by_name,
+        createdAt: r.created_at,
+      }));
+    }),
+    confirmGHTransferHead: makeMutationHook(async (id: number) =>
+      apiFetch(`/api/greenhouse/transfers/${id}/confirm-head`, { method: "POST" })
+    ),
+    confirmGHTransferReceiver: makeMutationHook(async (id: number) =>
+      apiFetch(`/api/greenhouse/transfers/${id}/confirm-receiver`, { method: "POST" })
+    ),
   },
   tasks: {
     getAll: makeQueryHook(["tasks", "getAll"], async (filters?: { status?: string; assignedTo?: number }) => {
@@ -1318,11 +1391,45 @@ export const trpc: any = {
       const data = await apiFetch("/api/dashboard/stats");
       const summary = data?.summary || {};
       const report = await apiFetch("/api/reports/general");
+
+      // Per-location greenhouse stage stock
+      const rawLocStock: any[] = data?.locationStageStock || [];
+      const rawSrcInv: any[] = data?.sourceInventory || [];
+
+      // Group greenhouse stage stock by location (skip source/padvo locations)
+      const locMap: Record<number, { locationId: number; locationName: string; isSource: boolean; stages: Record<string, number> }> = {};
+      for (const row of rawLocStock) {
+        if (row.is_source) continue;
+        const lid = Number(row.location_id);
+        if (!locMap[lid]) {
+          locMap[lid] = { locationId: lid, locationName: row.location_name, isSource: false, stages: {} };
+        }
+        if (row.stage) locMap[lid].stages[row.stage] = Number(row.quantity || 0);
+      }
+      const locationStageStock = Object.values(locMap);
+
+      // Group source/padvo inventory by location as per-batch list
+      const srcLocMap: Record<number, { locationId: number; locationName: string; batches: Array<{ batchId: number; batchCode: string; varietyName: string; seedlingTypeName: string; stage: string; quantity: number }> }> = {};
+      for (const row of rawSrcInv) {
+        const lid = Number(row.location_id);
+        if (!srcLocMap[lid]) {
+          srcLocMap[lid] = { locationId: lid, locationName: row.location_name, batches: [] };
+        }
+        srcLocMap[lid].batches.push({
+          batchId: Number(row.batch_id),
+          batchCode: row.batch_code || "",
+          varietyName: row.variety_name || "",
+          seedlingTypeName: row.seedling_type_name || "",
+          stage: row.stage || "",
+          quantity: Number(row.quantity || 0),
+        });
+      }
+      const sourceLocationInventory = Object.values(srcLocMap);
+
       return {
         totalBatches: Number(report?.summary?.batches_count || 0),
         totalLocations: Number(report?.summary?.locations_count || 0),
         totalTransfers: Number(report?.summary?.transfers_count || 0),
-        // Teplitsa bosqichlari (greenhouse_stage_stock)
         greenhouseReady: Number(summary.greenhouse_ready || 0),
         greenhouseGrafted: Number(summary.greenhouse_grafted || 0),
         greenhouseGrafting: Number(summary.greenhouse_grafting || 0),
@@ -1331,6 +1438,8 @@ export const trpc: any = {
         pendingTransfers: Number(summary.pending_transfers || 0),
         pendingApprovals: Number(summary.pending_approvals || 0),
         openTasks: Number(summary.open_tasks || 0),
+        locationStageStock,
+        sourceLocationInventory,
       };
     }),
     getActivityLog: makeQueryHook(["dashboard", "getActivityLog"], async () => {

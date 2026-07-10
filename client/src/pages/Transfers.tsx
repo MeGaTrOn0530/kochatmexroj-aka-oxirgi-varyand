@@ -24,7 +24,7 @@ import {
   escapeHtml,
   printHtmlDocument,
 } from "@/lib/print-documents";
-import { ArrowRight, CheckCircle2, Download, Plus, Printer, TrendingUp } from "lucide-react";
+import { ArrowRight, CheckCircle2, Download, Plus, Printer, TrendingUp, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -38,9 +38,10 @@ const roleText = {
 
 const workflowStatusLabel = {
   pending_sender: "Jo'natuvchi tasdig'i kutilmoqda",
-  pending_head: "Bosh agronom tasdig'i kutilmoqda",
   pending_receiver: "Qabul qiluvchi tasdig'i kutilmoqda",
+  pending_head: "Bosh agronom tasdig'i kutilmoqda",
   completed: "Yakunlandi",
+  rejected: "Rad etildi",
 } as const;
 
 const transferTypeLabel = {
@@ -183,10 +184,30 @@ function buildTransferReceiptBody(transfer: any) {
   `;
 }
 
+const STAGES = ["cassette", "grafting", "grafted", "ready"] as const;
+const STAGE_LABELS: Record<string, string> = {
+  cassette: "Kasetada",
+  grafting: "Payvantlanmagan",
+  grafted: "Payvantlangan",
+  ready: "Tayyor",
+};
+const STAGE_COLORS: Record<string, string> = {
+  cassette: "border-yellow-300 bg-yellow-50 dark:bg-yellow-900/20",
+  grafting: "border-blue-300 bg-blue-50 dark:bg-blue-900/20",
+  grafted: "border-green-300 bg-green-50 dark:bg-green-900/20",
+  ready: "border-emerald-300 bg-emerald-50 dark:bg-emerald-900/20",
+};
+
+function formatN(n: number) {
+  return n.toLocaleString("uz-UZ");
+}
+
 export default function TransfersPage() {
   const { user } = useAuth();
   const utils = trpc.useUtils();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [rejectTransferId, setRejectTransferId] = useState<number | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const agranomFromLocationId = user?.role === "agranom" && user?.locationId
     ? String(user.locationId)
     : "";
@@ -197,6 +218,12 @@ export default function TransfersPage() {
     quantity: "",
     transferType: "movement",
     note: "",
+    // greenhouse bosqich transfer uchun qo'shimcha maydonlar
+    fromStage: "",
+    fromRootstockTypeId: "",
+    fromVarietyId: "",
+    toStage: "cassette",
+    actionDate: new Date().toISOString().slice(0, 10),
   });
 
   useEffect(() => {
@@ -207,28 +234,79 @@ export default function TransfersPage() {
   }, [agranomFromLocationId]);
 
   const { data: transfers } = trpc.transfers.getAll.useQuery();
+  const { data: ghTransfers } = trpc.greenhouse.getGreenhouseTransfers.useQuery();
   const { data: batches } = trpc.seedlings.getBatches.useQuery();
   const { data: locations } = trpc.locations.getAllDestinations.useQuery();
+
+  // Tanlangan manba lokatsiyaning turi
+  const fromLocation = (locations || []).find((l) => String(l.id) === formData.fromLocationId);
+  // is_source=1 (Жомбой kabi dona chiqaruvchi joy) → batch flow; oddiy teplitsa → stage flow
+  const isGreenhouseSource = fromLocation?.type === "greenhouse" && !fromLocation?.isSource;
+
+  // Greenhouse manbasi tanlanganda uning stok va nav ma'lumotlarini yuklash
+  const ghSourceId = isGreenhouseSource && formData.fromLocationId ? Number(formData.fromLocationId) : 0;
+  const { data: ghSourceStatus } = trpc.greenhouse.getOne.useQuery(ghSourceId, { enabled: ghSourceId > 0 });
+  const { data: ghSourceVariety } = trpc.greenhouse.getVarietyStock.useQuery(ghSourceId, { enabled: ghSourceId > 0 });
+  const ghStock = ghSourceStatus?.stock;
 
   const invalidateTransfers = async () => {
     await utils.transfers.getAll.invalidate();
   };
 
+  const resetForm = () => setFormData({
+    batchId: "",
+    fromLocationId: agranomFromLocationId,
+    toLocationId: "",
+    quantity: "",
+    transferType: "movement",
+    note: "",
+    fromStage: "",
+    fromRootstockTypeId: "",
+    fromVarietyId: "",
+    toStage: "cassette",
+    actionDate: new Date().toISOString().slice(0, 10),
+  });
+
   const createTransferMutation = trpc.transfers.createTransfer.useMutation({
     onSuccess: async () => {
       toast.success("Transfer yaratildi");
-      setFormData({
-        batchId: "",
-        fromLocationId: agranomFromLocationId,
-        toLocationId: "",
-        quantity: "",
-        transferType: "movement",
-        note: "",
-      });
+      resetForm();
       setIsDialogOpen(false);
       await invalidateTransfers();
     },
     onError: (error) => {
+      toast.error(error.message || "Xato yuz berdi");
+    },
+  });
+
+  const stageTransferMutation = trpc.greenhouse.stageTransfer.useMutation({
+    onSuccess: async () => {
+      toast.success("Transfer yaratildi. Bosh agronom tasdig'i kutilmoqda.");
+      resetForm();
+      setIsDialogOpen(false);
+      await utils.greenhouse.transfers.invalidate();
+    },
+    onError: (error: any) => {
+      toast.error(error.message || "Xato yuz berdi");
+    },
+  });
+
+  const confirmGHHeadMutation = trpc.greenhouse.confirmGHTransferHead.useMutation({
+    onSuccess: async () => {
+      toast.success("Bosh agronom tasdig'i saqlandi");
+      await utils.greenhouse.transfers.invalidate();
+    },
+    onError: (error: any) => {
+      toast.error(error.message || "Xato yuz berdi");
+    },
+  });
+
+  const confirmGHReceiverMutation = trpc.greenhouse.confirmGHTransferReceiver.useMutation({
+    onSuccess: async () => {
+      toast.success("Qabul tasdig'i saqlandi");
+      await utils.greenhouse.transfers.invalidate();
+    },
+    onError: (error: any) => {
       toast.error(error.message || "Xato yuz berdi");
     },
   });
@@ -255,11 +333,23 @@ export default function TransfersPage() {
 
   const confirmReceiverMutation = trpc.transfers.confirmReceiver.useMutation({
     onSuccess: async () => {
-      toast.success("Qabul tasdiqlandi");
+      toast.success("Qabul tasdiqlandi. Bosh agronom tasdig'i kutilmoqda.");
       await invalidateTransfers();
     },
     onError: (error) => {
       toast.error(error.message || "Qabulni tasdiqlab bo'lmadi");
+    },
+  });
+
+  const rejectTransferMutation = trpc.transfers.rejectTransfer.useMutation({
+    onSuccess: async () => {
+      toast.success("Transfer rad etildi");
+      setRejectTransferId(null);
+      setRejectReason("");
+      await invalidateTransfers();
+    },
+    onError: (error) => {
+      toast.error(error.message || "Rad etib bo'lmadi");
     },
   });
 
@@ -340,26 +430,45 @@ export default function TransfersPage() {
   }, [formData.fromLocationId, selectedBatch]);
 
   const handleCreateTransfer = () => {
-    if (
-      !formData.batchId ||
-      !formData.fromLocationId ||
-      !formData.toLocationId ||
-      !formData.quantity
-    ) {
+    if (!formData.fromLocationId || !formData.toLocationId || !formData.quantity) {
       toast.error("Barcha maydonlarni to'ldiring");
       return;
     }
-
     if (formData.fromLocationId === formData.toLocationId) {
       toast.error("Jo'natish va qabul lokatsiyasi bir xil bo'lmasligi kerak");
       return;
     }
 
+    // Greenhouse bosqich transferi
+    if (isGreenhouseSource) {
+      if (!formData.fromStage) {
+        toast.error("Qaysi bosqichdan o'tkazishni tanlang");
+        return;
+      }
+      stageTransferMutation.mutate({
+        locationId: Number(formData.fromLocationId),
+        toLocationId: Number(formData.toLocationId),
+        fromStage: formData.fromStage,
+        toStage: formData.toStage || formData.fromStage,
+        quantity: Number(formData.quantity),
+        fromRootstockTypeId: formData.fromRootstockTypeId && formData.fromRootstockTypeId !== "0"
+          ? Number(formData.fromRootstockTypeId)
+          : undefined,
+        notes: formData.note.trim() || undefined,
+        actionDate: formData.actionDate || undefined,
+      });
+      return;
+    }
+
+    // Jomboya/boshqa batch transferi
+    if (!formData.batchId) {
+      toast.error("Barcha maydonlarni to'ldiring");
+      return;
+    }
     if (selectedBatch && Number(formData.quantity) > Number(selectedBatch.quantityAvailable || 0)) {
       toast.error(`Mavjud qoldiq yetarli emas. Mavjud: ${selectedBatch.quantityAvailable ?? 0} ta`);
       return;
     }
-
     createTransferMutation.mutate({
       batchId: Number(selectedBatch?.batchId || selectedBatch?.id),
       fromLocationId: Number(formData.fromLocationId),
@@ -411,16 +520,20 @@ export default function TransfersPage() {
                   Yangi transfer
                 </Button>
               </DialogTrigger>
-              <DialogContent>
+              <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
                 <DialogHeader>
                   <DialogTitle>Yangi Ko'chat Transferi</DialogTitle>
                   <DialogDescription>
-                    {user?.role === "agranom"
-                      ? "Transfer so'rovi yaratiladi va bosh agronom tasdiqlashidan so'ng amalga oshiriladi."
-                      : "Ko'chatlarni lokatsiyalar orasida transfer qilish."}
+                    {isGreenhouseSource
+                      ? "Teplitsadan bosqich bo'yicha boshqa teplitsaga o'tkazish."
+                      : user?.role === "agranom"
+                        ? "Transfer so'rovi yaratiladi va bosh agronom tasdiqlashidan so'ng amalga oshiriladi."
+                        : "Ko'chatlarni lokatsiyalar orasida transfer qilish."}
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 py-4">
+
+                  {/* Qaysi joydan */}
                   <div className="space-y-2">
                     <Label>Qaysi joydan</Label>
                     {user?.role === "agranom" ? (
@@ -435,6 +548,9 @@ export default function TransfersPage() {
                             ...current,
                             fromLocationId: value,
                             batchId: "",
+                            fromStage: "",
+                            fromRootstockTypeId: "",
+                            fromVarietyId: "",
                           }))
                         }
                       >
@@ -451,43 +567,124 @@ export default function TransfersPage() {
                       </Select>
                     )}
                   </div>
-                  <div className="space-y-2">
-                    <Label>Ko'chat partiyasi</Label>
-                    <Select
-                      value={formData.batchId}
-                      onValueChange={(value) =>
-                        setFormData((current) => ({ ...current, batchId: value }))
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Tanlang..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableTransferBatches?.map((batch) => (
-                          <SelectItem
-                            key={`${batch.batchId || batch.id}-${batch.inventoryId || batch.id}`}
-                            value={(batch.inventoryId || batch.id).toString()}
-                          >
-                            {batch.batchNumber} · {locationMap.get(batch.locationId) || batch.locationId}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {selectedBatch && (
-                      <div className="rounded-2xl border border-border/70 bg-muted/30 px-4 py-3 text-sm">
-                        <div className="flex justify-between gap-3">
-                          <span className="text-muted-foreground">Jo'natish joyi</span>
-                          <span className="font-medium text-foreground">
-                            {locationMap.get(selectedBatch.locationId) || selectedBatch.locationId}
-                          </span>
-                        </div>
-                        <div className="mt-2 flex justify-between gap-3">
-                          <span className="text-muted-foreground">Mavjud qoldiq</span>
-                          <span className="font-medium text-green-600">{selectedBatch.quantityAvailable ?? selectedBatch.healthyQuantity}</span>
-                        </div>
+
+                  {/* Greenhouse: bosqich+nav visual panel */}
+                  {isGreenhouseSource ? (
+                    <div className="space-y-2">
+                      <Label className="text-xs font-semibold text-yellow-800">
+                        Qaysi bosqich va navdan * (bosing tanlash uchun)
+                      </Label>
+                      <div className="space-y-2">
+                        {STAGES.map((stage) => {
+                          const stRows = (ghSourceVariety || []).filter(
+                            (r: any) => r.stage === stage && r.quantity > 0
+                          );
+                          const stActual = (ghStock?.[stage as keyof typeof ghStock] as number) || 0;
+                          if (stActual === 0) return null;
+                          const stVarTotal = stRows.reduce((s: number, r: any) => s + r.quantity, 0);
+                          const stScale = stVarTotal > stActual && stVarTotal > 0 ? stActual / stVarTotal : 1;
+                          return (
+                            <div key={stage} className={`rounded-lg border p-2 ${STAGE_COLORS[stage]}`}>
+                              <p className="text-[11px] font-semibold mb-1.5 opacity-80">
+                                {STAGE_LABELS[stage]} — jami {formatN(stActual)} ta
+                              </p>
+                              <div className="space-y-1">
+                                {stRows.length > 0 ? stRows.map((r: any, i: number) => {
+                                  const isSelected =
+                                    formData.fromStage === stage &&
+                                    formData.fromRootstockTypeId === String(r.rootstockTypeId ?? 0) &&
+                                    formData.fromVarietyId === String(r.varietyId ?? 0);
+                                  return (
+                                    <button
+                                      key={i}
+                                      type="button"
+                                      className={`w-full flex items-center justify-between rounded px-2.5 py-1.5 text-xs border transition-colors ${
+                                        isSelected
+                                          ? "border-primary bg-primary/10 font-semibold"
+                                          : "border-border/60 bg-background hover:bg-muted/40"
+                                      }`}
+                                      onClick={() => setFormData((f) => ({
+                                        ...f,
+                                        fromStage: stage,
+                                        fromRootstockTypeId: String(r.rootstockTypeId ?? 0),
+                                        fromVarietyId: String(r.varietyId ?? 0),
+                                      }))}
+                                    >
+                                      <span>
+                                        {r.varietyName || "Aniqlanmagan nav"}
+                                        {r.rootstockTypeName ? ` / ${r.rootstockTypeName}` : ""}
+                                      </span>
+                                      <span className="font-bold">{formatN(Math.round(r.quantity * stScale))} ta</span>
+                                    </button>
+                                  );
+                                }) : (
+                                  <button
+                                    type="button"
+                                    className={`w-full flex items-center justify-between rounded px-2.5 py-1.5 text-xs border transition-colors ${
+                                      formData.fromStage === stage
+                                        ? "border-primary bg-primary/10 font-semibold"
+                                        : "border-border/60 bg-background hover:bg-muted/40"
+                                    }`}
+                                    onClick={() => setFormData((f) => ({
+                                      ...f,
+                                      fromStage: stage,
+                                      fromRootstockTypeId: "0",
+                                    }))}
+                                  >
+                                    <span>Barcha ko'chatlar</span>
+                                    <span className="font-bold">{formatN(stActual)} ta</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  ) : (
+                    /* Jomboya/boshqa: partiya tanlash */
+                    <div className="space-y-2">
+                      <Label>Ko'chat partiyasi</Label>
+                      <Select
+                        value={formData.batchId}
+                        onValueChange={(value) =>
+                          setFormData((current) => ({ ...current, batchId: value }))
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Tanlang..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {availableTransferBatches?.map((batch) => (
+                            <SelectItem
+                              key={`${batch.batchId || batch.id}-${batch.inventoryId || batch.id}`}
+                              value={(batch.inventoryId || batch.id).toString()}
+                            >
+                              {batch.batchNumber} · {locationMap.get(batch.locationId) || batch.locationId} · {Number(batch.quantityAvailable || batch.healthyQuantity || 0).toLocaleString("uz-UZ")} ta
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {selectedBatch && (
+                        <div className="rounded-2xl border border-border/70 bg-muted/30 px-4 py-3 text-sm">
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground">Jo'natish joyi</span>
+                            <span className="font-medium text-foreground">
+                              {locationMap.get(selectedBatch.locationId) || selectedBatch.locationId}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex justify-between gap-3">
+                            <span className="text-muted-foreground">Mavjud qoldiq</span>
+                            <span className="font-medium text-green-600">
+                              {selectedBatch.quantityAvailable ?? selectedBatch.healthyQuantity}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Qaysi joyga */}
                   <div className="space-y-2">
                     <Label>Qaysi joyga</Label>
                     <Select
@@ -500,8 +697,11 @@ export default function TransfersPage() {
                         <SelectValue placeholder="Tanlang..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {locations
-                          ?.filter((location) => location.id.toString() !== formData.fromLocationId)
+                        {(locations || [])
+                          .filter((location) =>
+                            location.id.toString() !== formData.fromLocationId &&
+                            (!isGreenhouseSource || location.type === "greenhouse")
+                          )
                           .map((location) => (
                             <SelectItem key={location.id} value={location.id.toString()}>
                               {location.name}
@@ -510,6 +710,27 @@ export default function TransfersPage() {
                       </SelectContent>
                     </Select>
                   </div>
+
+                  {/* Greenhouse: qaysi bosqichga */}
+                  {isGreenhouseSource && (
+                    <div className="space-y-2">
+                      <Label>Qaysi bosqichga *</Label>
+                      <Select
+                        value={formData.toStage}
+                        onValueChange={(value) => setFormData((f) => ({ ...f, toStage: value }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {STAGES.map((s) => (
+                            <SelectItem key={s} value={s}>{STAGE_LABELS[s]}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+
                   <div className="space-y-2">
                     <Label htmlFor="transfer-quantity">Miqdori</Label>
                     <Input
@@ -522,24 +743,41 @@ export default function TransfersPage() {
                       }
                     />
                   </div>
-                  <div className="space-y-2">
-                    <Label>Transfer turi</Label>
-                    <Select
-                      value={formData.transferType}
-                      onValueChange={(value) =>
-                        setFormData((current) => ({ ...current, transferType: value }))
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="movement">Harakatlanish</SelectItem>
-                        <SelectItem value="exchange">Almashinuv</SelectItem>
-                        <SelectItem value="return">Qaytarish</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+
+                  {/* Greenhouse: sana */}
+                  {isGreenhouseSource && (
+                    <div className="space-y-2">
+                      <Label>Sana</Label>
+                      <Input
+                        type="date"
+                        value={formData.actionDate}
+                        onChange={(e) => setFormData((f) => ({ ...f, actionDate: e.target.value }))}
+                      />
+                    </div>
+                  )}
+
+                  {/* Batch: transfer turi */}
+                  {!isGreenhouseSource && (
+                    <div className="space-y-2">
+                      <Label>Transfer turi</Label>
+                      <Select
+                        value={formData.transferType}
+                        onValueChange={(value) =>
+                          setFormData((current) => ({ ...current, transferType: value }))
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="movement">Harakatlanish</SelectItem>
+                          <SelectItem value="exchange">Almashinuv</SelectItem>
+                          <SelectItem value="return">Qaytarish</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+
                   <div className="space-y-2">
                     <Label>Izoh</Label>
                     <Input
@@ -556,9 +794,11 @@ export default function TransfersPage() {
                     </Button>
                     <Button
                       onClick={handleCreateTransfer}
-                      disabled={createTransferMutation.isPending}
+                      disabled={createTransferMutation.isPending || stageTransferMutation.isPending}
                     >
-                      {createTransferMutation.isPending ? "Saqlanmoqda..." : "Saqlash"}
+                      {(createTransferMutation.isPending || stageTransferMutation.isPending)
+                        ? "Saqlanmoqda..."
+                        : "Saqlash"}
                     </Button>
                   </div>
                 </div>
@@ -581,51 +821,42 @@ export default function TransfersPage() {
             ) : (
               <div className="space-y-3">
                 {visibleTransfers.map((transfer) => {
+                  // Yangi tartib: Sender → Receiver → Head
                   let actionButton: React.ReactNode = null;
+                  const isRejected = transfer.workflowStatus === "rejected" || transfer.status === "rejected";
 
-                  if (
-                    (user?.role === "admin" ||
-                      (user?.role === "agranom" && user.locationId === transfer.fromLocationId)) &&
-                    !transfer.senderConfirmedBy
-                  ) {
-                    actionButton = (
-                      <Button
-                        size="sm"
-                        onClick={() => confirmSenderMutation.mutate(transfer.id)}
-                        disabled={confirmSenderMutation.isPending}
-                      >
-                        Jo'natishni tasdiqlash
-                      </Button>
-                    );
-                  } else if (
-                    (user?.role === "admin" || user?.role === "bosh_agranom") &&
-                    transfer.senderConfirmedBy &&
-                    !transfer.headConfirmedBy
-                  ) {
-                    actionButton = (
-                      <Button
-                        size="sm"
-                        onClick={() => confirmHeadMutation.mutate(transfer.id)}
-                        disabled={confirmHeadMutation.isPending}
-                      >
-                        Bosh agronom tasdiqlashi
-                      </Button>
-                    );
-                  } else if (
-                    (user?.role === "admin" ||
-                      (user?.role === "agranom" && user.locationId === transfer.toLocationId)) &&
-                    transfer.headConfirmedBy &&
-                    !transfer.receiverConfirmedBy
-                  ) {
-                    actionButton = (
-                      <Button
-                        size="sm"
-                        onClick={() => confirmReceiverMutation.mutate(transfer.id)}
-                        disabled={confirmReceiverMutation.isPending}
-                      >
-                        Qabulni tasdiqlash
-                      </Button>
-                    );
+                  if (!isRejected && transfer.workflowStatus !== "completed") {
+                    if (
+                      !transfer.senderConfirmedBy &&
+                      (user?.role === "admin" || (user?.role === "agranom" && user.locationId === transfer.fromLocationId))
+                    ) {
+                      // 1-qadam: Jo'natuvchi tasdiqlaydi
+                      actionButton = (
+                        <Button size="sm" onClick={() => confirmSenderMutation.mutate(transfer.id)} disabled={confirmSenderMutation.isPending}>
+                          Jo'natishni tasdiqlash
+                        </Button>
+                      );
+                    } else if (
+                      transfer.senderConfirmedBy && !transfer.receiverConfirmedBy &&
+                      (user?.role === "admin" || (user?.role === "agranom" && user.locationId === transfer.toLocationId))
+                    ) {
+                      // 2-qadam: Qabul qiluvchi tasdiqlaydi
+                      actionButton = (
+                        <Button size="sm" onClick={() => confirmReceiverMutation.mutate(transfer.id)} disabled={confirmReceiverMutation.isPending}>
+                          Qabulni tasdiqlash
+                        </Button>
+                      );
+                    } else if (
+                      transfer.receiverConfirmedBy && !transfer.headConfirmedBy &&
+                      (user?.role === "admin" || user?.role === "bosh_agranom")
+                    ) {
+                      // 3-qadam: Bosh agronom tasdiqlaydi (so'nggi)
+                      actionButton = (
+                        <Button size="sm" onClick={() => confirmHeadMutation.mutate(transfer.id)} disabled={confirmHeadMutation.isPending}>
+                          Bosh agronom tasdiqlashi
+                        </Button>
+                      );
+                    }
                   }
 
                   return (
@@ -645,6 +876,13 @@ export default function TransfersPage() {
                           <p className="text-sm text-muted-foreground">
                             {transfer.quantity} ta ko'chat
                           </p>
+                          {(transfer.seedlingTypeName || transfer.varietyName || transfer.rootstockTypeName) && (
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              {[transfer.seedlingTypeName, transfer.varietyName, transfer.rootstockTypeName]
+                                .filter(Boolean)
+                                .join(" / ")}
+                            </p>
+                          )}
                         </div>
                         <div className="flex items-center gap-3">
                           <div className="text-right">
@@ -673,40 +911,58 @@ export default function TransfersPage() {
                           <span className="inline-flex items-center rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent">
                             {transferTypeLabel[transfer.transferType as keyof typeof transferTypeLabel]}
                           </span>
-                          <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-semibold text-foreground">
+                          <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+                            transfer.workflowStatus === "rejected"
+                              ? "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+                              : "bg-muted text-foreground"
+                          }`}>
                             {transfer.workflowStatus
-                              ? workflowStatusLabel[
-                                  transfer.workflowStatus as keyof typeof workflowStatusLabel
-                                ]
+                              ? workflowStatusLabel[transfer.workflowStatus as keyof typeof workflowStatusLabel]
                               : "Jarayon davom etmoqda"}
                           </span>
-                          {transfer.receiverConfirmedBy && (
+                          {transfer.workflowStatus === "completed" && (
                             <span className="inline-flex items-center rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700 dark:bg-green-900 dark:text-green-100">
                               <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
                               Yakunlandi
                             </span>
                           )}
+                          {transfer.workflowStatus === "rejected" && (
+                            <span className="inline-flex items-center rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700">
+                              <XCircle className="mr-1 h-3.5 w-3.5" />
+                              Rad etildi
+                            </span>
+                          )}
                         </div>
                       </div>
 
+                      {/* Yangi tartib: 1-Jo'natuvchi, 2-Qabul qiluvchi, 3-Bosh agronom */}
                       <div className="grid gap-3 text-sm md:grid-cols-3">
-                        <div className="rounded-xl bg-muted/40 px-3 py-2">
-                          <p className="text-xs text-muted-foreground">Jo'natuvchi agronom</p>
-                          <p className="font-medium text-foreground">
-                            {transfer.senderConfirmedBy ? "Tasdiqlangan" : "Kutilmoqda"}
+                        <div className={`rounded-xl px-3 py-2 ${transfer.senderConfirmedBy ? "bg-green-50 dark:bg-green-900/20" : "bg-muted/40"}`}>
+                          <p className="text-xs text-muted-foreground">1. Jo'natuvchi</p>
+                          <p className={`font-medium ${transfer.senderConfirmedBy ? "text-green-700" : "text-foreground"}`}>
+                            {transfer.senderConfirmedBy ? "✓ Tasdiqlangan" : "Kutilmoqda"}
                           </p>
+                          {transfer.senderConfirmedByName && (
+                            <p className="text-[10px] text-muted-foreground">{transfer.senderConfirmedByName}</p>
+                          )}
                         </div>
-                        <div className="rounded-xl bg-muted/40 px-3 py-2">
-                          <p className="text-xs text-muted-foreground">Bosh agronom</p>
-                          <p className="font-medium text-foreground">
-                            {transfer.headConfirmedBy ? "Tasdiqlangan" : "Kutilmoqda"}
+                        <div className={`rounded-xl px-3 py-2 ${transfer.receiverConfirmedBy ? "bg-green-50 dark:bg-green-900/20" : "bg-muted/40"}`}>
+                          <p className="text-xs text-muted-foreground">2. Qabul qiluvchi</p>
+                          <p className={`font-medium ${transfer.receiverConfirmedBy ? "text-green-700" : "text-foreground"}`}>
+                            {transfer.receiverConfirmedBy ? "✓ Tasdiqlangan" : "Kutilmoqda"}
                           </p>
+                          {transfer.receiverConfirmedByName && (
+                            <p className="text-[10px] text-muted-foreground">{transfer.receiverConfirmedByName}</p>
+                          )}
                         </div>
-                        <div className="rounded-xl bg-muted/40 px-3 py-2">
-                          <p className="text-xs text-muted-foreground">Qabul qiluvchi agronom</p>
-                          <p className="font-medium text-foreground">
-                            {transfer.receiverConfirmedBy ? "Tasdiqlangan" : "Kutilmoqda"}
+                        <div className={`rounded-xl px-3 py-2 ${transfer.headConfirmedBy ? "bg-green-50 dark:bg-green-900/20" : "bg-muted/40"}`}>
+                          <p className="text-xs text-muted-foreground">3. Bosh agronom</p>
+                          <p className={`font-medium ${transfer.headConfirmedBy ? "text-green-700" : "text-foreground"}`}>
+                            {transfer.headConfirmedBy ? "✓ Tasdiqlangan" : "Kutilmoqda"}
                           </p>
+                          {transfer.headConfirmedByName && (
+                            <p className="text-[10px] text-muted-foreground">{transfer.headConfirmedByName}</p>
+                          )}
                         </div>
                       </div>
 
@@ -733,7 +989,21 @@ export default function TransfersPage() {
                             </Button>
                           </>
                         ) : null}
-                        {actionButton ? actionButton : null}
+                        {actionButton}
+                        {/* Rad etish tugmasi (admin yoki bosh_agranom) */}
+                        {(user?.role === "admin" || user?.role === "bosh_agranom") &&
+                          transfer.workflowStatus !== "completed" &&
+                          transfer.workflowStatus !== "rejected" && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5 border-red-300 text-red-600 hover:bg-red-50"
+                            onClick={() => { setRejectTransferId(transfer.id); setRejectReason(""); }}
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            Rad etish
+                          </Button>
+                        )}
                       </div>
                     </div>
                   );
@@ -742,7 +1012,131 @@ export default function TransfersPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Teplitsa bosqich transferlari */}
+        {(ghTransfers && ghTransfers.length > 0) && (
+          <Card className="card-elegant">
+            <CardHeader>
+              <CardTitle>Bosqich transferlari (teplitsa→teplitsa)</CardTitle>
+              <CardDescription>{ghTransfers.length} ta bosqich transferi</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {ghTransfers.map((gt) => {
+                  let actionBtn: React.ReactNode = null;
+                  if ((user?.role === "admin" || user?.role === "bosh_agranom") && !gt.headConfirmedBy) {
+                    actionBtn = (
+                      <Button size="sm" onClick={() => confirmGHHeadMutation.mutate(gt.id)} disabled={confirmGHHeadMutation.isPending}>
+                        Bosh agronom tasdiqlashi
+                      </Button>
+                    );
+                  } else if (
+                    gt.headConfirmedBy && !gt.receiverConfirmedBy &&
+                    (user?.role === "admin" || user?.role === "bosh_agranom" ||
+                      (user?.role === "agranom" && user.locationId === gt.toLocationId))
+                  ) {
+                    actionBtn = (
+                      <Button size="sm" onClick={() => confirmGHReceiverMutation.mutate(gt.id)} disabled={confirmGHReceiverMutation.isPending}>
+                        Qabulni tasdiqlash
+                      </Button>
+                    );
+                  }
+
+                  return (
+                    <div key={gt.id} className="flex flex-col gap-4 rounded-xl border border-border bg-background/60 p-4">
+                      <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
+                        <div className="flex-1">
+                          <p className="font-semibold text-foreground">{gt.transferCode}</p>
+                          <p className="text-sm text-muted-foreground">{gt.quantity} ta ko'chat</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {STAGE_LABELS[gt.fromStage] || gt.fromStage} → {STAGE_LABELS[gt.toStage] || gt.toStage}
+                            {gt.rootstockTypeName ? ` · ${gt.rootstockTypeName}` : ""}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <p className="text-xs text-muted-foreground">Qaysi joydan</p>
+                            <p className="font-medium text-foreground">{gt.fromLocationName || `#${gt.fromLocationId}`}</p>
+                          </div>
+                          <ArrowRight className="h-5 w-5 text-accent" />
+                          <div className="text-left">
+                            <p className="text-xs text-muted-foreground">Qaysi joyga</p>
+                            <p className="font-medium text-foreground">{gt.toLocationName || `#${gt.toLocationId}`}</p>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="inline-flex items-center rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent">
+                            Bosqich transferi
+                          </span>
+                          <span className="inline-flex items-center rounded-full bg-muted px-3 py-1 text-xs font-semibold text-foreground">
+                            {workflowStatusLabel[gt.status as keyof typeof workflowStatusLabel] || gt.status}
+                          </span>
+                          {gt.receiverConfirmedBy && (
+                            <span className="inline-flex items-center rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700 dark:bg-green-900 dark:text-green-100">
+                              <CheckCircle2 className="mr-1 h-3.5 w-3.5" />
+                              Yakunlandi
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="grid gap-3 text-sm md:grid-cols-3">
+                        <div className="rounded-xl bg-muted/40 px-3 py-2">
+                          <p className="text-xs text-muted-foreground">Jo'natuvchi agronom</p>
+                          <p className="font-medium text-foreground">Tasdiqlangan</p>
+                        </div>
+                        <div className="rounded-xl bg-muted/40 px-3 py-2">
+                          <p className="text-xs text-muted-foreground">Bosh agronom</p>
+                          <p className="font-medium text-foreground">{gt.headConfirmedBy ? "Tasdiqlangan" : "Kutilmoqda"}</p>
+                        </div>
+                        <div className="rounded-xl bg-muted/40 px-3 py-2">
+                          <p className="text-xs text-muted-foreground">Qabul qiluvchi agronom</p>
+                          <p className="font-medium text-foreground">{gt.receiverConfirmedBy ? "Tasdiqlangan" : "Kutilmoqda"}</p>
+                        </div>
+                      </div>
+                      {actionBtn && <div className="flex flex-wrap items-center gap-2">{actionBtn}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
+      {/* Rad etish dialogi */}
+      {rejectTransferId !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) { setRejectTransferId(null); setRejectReason(""); }}}
+        >
+          <div className="w-full max-w-md rounded-3xl border border-border bg-background p-6 shadow-2xl">
+            <h2 className="text-lg font-bold text-foreground">Transferni rad etish</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Rad etilgandan so'ng inventar qaytariladi.
+            </p>
+            <div className="mt-4 space-y-2">
+              <Label>Rad etish sababi (ixtiyoriy)</Label>
+              <Input
+                placeholder="Masalan: miqdori noto'g'ri, ma'lumot xato..."
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="mt-5 flex justify-end gap-3">
+              <Button variant="outline" onClick={() => { setRejectTransferId(null); setRejectReason(""); }}>
+                Bekor qilish
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={rejectTransferMutation.isPending}
+                onClick={() => rejectTransferMutation.mutate({ transferId: rejectTransferId, reason: rejectReason || undefined })}
+              >
+                {rejectTransferMutation.isPending ? "Rad etilmoqda..." : "Rad etish"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </DashboardLayout>
   );
 }

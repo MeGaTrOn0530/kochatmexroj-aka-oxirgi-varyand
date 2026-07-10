@@ -112,6 +112,7 @@ const getMenuItems = (role?: string, locationIsSource?: boolean, boshOfesModules
         { icon: Leaf,            label: "Ko'chat partiyalari", path: "/seedlings" },
         { icon: TrendingUp,      label: "Transferlar",         path: "/transfers" },
         { icon: FileText,        label: "Buyurtmalar",         path: "/orders" },
+        { icon: Truck,           label: "Yetkazib berish",     path: "/deliveries" },
         { icon: BookOpen,        label: "Agro jurnal",         path: "/agro-journal" },
         { icon: BarChart3,       label: "Mening obyektim",     path: "/locations" },
       ];

@@ -101,6 +101,18 @@ export default function GreenhouseStages() {
   const [isReceiveDialogOpen, setIsReceiveDialogOpen] = useState(false);
   const [navDetailStage, setNavDetailStage] = useState<string | null>(null);
 
+  const [isStageTransferDialogOpen, setIsStageTransferDialogOpen] = useState(false);
+  const [stageTransferForm, setStageTransferForm] = useState({
+    toLocationId: "",
+    fromStage: "",
+    fromRootstockTypeId: "",
+    fromVarietyId: "",
+    toStage: "cassette",
+    quantity: "",
+    notes: "",
+    actionDate: new Date().toISOString().slice(0, 10),
+  });
+
   const [moveForm, setMoveForm] = useState({
     fromStage: "cassette",
     toStage: "grafting",
@@ -108,6 +120,7 @@ export default function GreenhouseStages() {
     failedQuantity: "",
     defectQuantity: "",
     defectNotes: "",
+    defectImages: [] as string[],
     actionDate: new Date().toISOString().slice(0, 10),
     notes: "",
     seedlingTypeId: "",
@@ -125,6 +138,7 @@ export default function GreenhouseStages() {
 
   const { data: summary, isFetching: summaryLoading } = trpc.greenhouse.getSummary.useQuery();
   const { data: locations } = trpc.locations.getAll.useQuery();
+  const { data: allLocations } = trpc.locations.getAllDestinations.useQuery();
   const { data: seedlingTypes } = trpc.catalog.getSeedlingTypes.useQuery();
   const { data: fruitVarieties } = trpc.catalog.getFruitVarieties.useQuery();
   const { data: rootstockTypes } = trpc.catalog.getRootstockTypes.useQuery();
@@ -164,6 +178,7 @@ export default function GreenhouseStages() {
         failedQuantity: "",
         defectQuantity: "",
         defectNotes: "",
+        defectImages: [],
         actionDate: new Date().toISOString().slice(0, 10),
         notes: "",
         seedlingTypeId: "",
@@ -200,6 +215,32 @@ export default function GreenhouseStages() {
     },
   });
 
+  const stageTransferMutation = trpc.greenhouse.stageTransfer.useMutation({
+    onSuccess: async () => {
+      toast.success("Transfer yaratildi. Bosh agronom tasdig'i kutilmoqda.");
+      setIsStageTransferDialogOpen(false);
+      setStageTransferForm({
+        toLocationId: "",
+        fromStage: "",
+        fromRootstockTypeId: "",
+        fromVarietyId: "",
+        toStage: "cassette",
+        quantity: "",
+        notes: "",
+        actionDate: new Date().toISOString().slice(0, 10),
+      });
+      await utils.greenhouse.getSummary.invalidate();
+      if (activeLocationId) {
+        await utils.greenhouse.getOne.invalidate(activeLocationId);
+        await utils.greenhouse.getLog.invalidate(activeLocationId);
+        await utils.greenhouse.getVarietyStock.invalidate(activeLocationId);
+      }
+    },
+    onError: (error: any) => {
+      toast.error(error.message || "O'tkazib bo'lmadi");
+    },
+  });
+
   const deleteLogMutation = trpc.greenhouse.deleteLog.useMutation({
     onSuccess: async () => {
       toast.success("Jurnal yozuvi bekor qilindi");
@@ -221,6 +262,8 @@ export default function GreenhouseStages() {
   const stock = detail?.stock;
 
   const isGraftingToGrafted = moveForm.fromStage === "grafting" && moveForm.toStage === "grafted";
+  const activeLocationInfo = (locations || []).find((l: any) => l.id === activeLocationId);
+  const isSourceLocation = activeLocationInfo?.isSource === true;
 
   return (
     <DashboardLayout>
@@ -343,6 +386,15 @@ export default function GreenhouseStages() {
                     <ArrowRight className="h-4 w-4" />
                     Bosqich o'zgartirish
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    onClick={() => setIsStageTransferDialogOpen(true)}
+                  >
+                    <ArrowRight className="h-4 w-4" />
+                    Boshqa teplitsaga
+                  </Button>
                 </div>
               )}
             </div>
@@ -432,7 +484,7 @@ export default function GreenhouseStages() {
                               : "—"}
                           </td>
                           <td className="px-4 py-2.5">
-                            {entry.fromStage ? (
+                            {entry.fromStage && entry.toStage ? (
                               <span className="flex items-center gap-1.5">
                                 <span
                                   className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${STAGE_COLORS[entry.fromStage]}`}
@@ -445,6 +497,16 @@ export default function GreenhouseStages() {
                                 >
                                   {STAGE_LABELS[entry.toStage] || entry.toStage}
                                 </span>
+                              </span>
+                            ) : entry.fromStage && !entry.toStage ? (
+                              <span className="flex items-center gap-1.5">
+                                <span
+                                  className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${STAGE_COLORS[entry.fromStage]}`}
+                                >
+                                  {STAGE_LABELS[entry.fromStage] || entry.fromStage}
+                                </span>
+                                <ArrowRight className="h-3 w-3 text-muted-foreground" />
+                                <span className="text-[10px] text-blue-600 font-medium">Teplitsaga</span>
                               </span>
                             ) : (
                               <span className="flex items-center gap-1.5">
@@ -518,6 +580,9 @@ export default function GreenhouseStages() {
           {(() => {
             const rows = (varietyStock || []).filter((r: any) => r.stage === navDetailStage && r.quantity > 0);
             const actualQty = navDetailStage ? (stock?.[navDetailStage as keyof typeof stock] as number || 0) : 0;
+            const varTotal = rows.reduce((s: number, r: any) => s + r.quantity, 0);
+            const scale = varTotal > actualQty && varTotal > 0 ? actualQty / varTotal : 1;
+            const displayQty = (q: number) => Math.round(q * scale);
             if (rows.length === 0) {
               return (
                 <div className="py-8 text-center text-sm text-muted-foreground">
@@ -527,10 +592,6 @@ export default function GreenhouseStages() {
                 </div>
               );
             }
-            // logdagi yig'indi actual stock dan katta bo'lsa, proporsional ko'rsatamiz
-            const varTotal = rows.reduce((s: number, r: any) => s + r.quantity, 0);
-            const scale = varTotal > 0 && actualQty > 0 ? actualQty / varTotal : 1;
-            const displayQty = (q: number) => Math.round(q * scale);
             return (
               <div className="space-y-3">
                 <div className="overflow-hidden rounded-xl border border-border/60">
@@ -662,8 +723,8 @@ export default function GreenhouseStages() {
               const stageVars = (varietyStock || []).filter((r: any) => r.stage === moveForm.fromStage && r.quantity > 0);
               if (!stageVars.length) return null;
               const stageTotal = (stock?.[moveForm.fromStage as keyof typeof stock] as number) || 0;
-              const sVarTotal = stageVars.reduce((s: number, r: any) => s + r.quantity, 0);
-              const sScale = sVarTotal > 0 && stageTotal > 0 ? stageTotal / sVarTotal : 1;
+              const stageVarTotal = stageVars.reduce((s: number, r: any) => s + r.quantity, 0);
+              const stageScale = stageVarTotal > stageTotal && stageVarTotal > 0 ? stageTotal / stageVarTotal : 1;
               return (
                 <div className="rounded-xl border border-yellow-200 bg-yellow-50/40 p-3 space-y-2">
                   <p className="text-xs font-semibold text-yellow-800">
@@ -673,10 +734,10 @@ export default function GreenhouseStages() {
                     {stageVars.map((r: any, i: number) => {
                       const fromIsRootstockOnly = ["cassette", "grafting"].includes(moveForm.fromStage);
                       const isSelected = fromIsRootstockOnly
-                        ? moveForm.fromRootstockTypeId === String(r.rootstockTypeId)
-                        : (moveForm.fromRootstockTypeId === String(r.rootstockTypeId) &&
-                           String(moveForm.varietyId) === String(r.varietyId) &&
-                           String(moveForm.seedlingTypeId) === String(r.seedlingTypeId));
+                        ? String(moveForm.fromRootstockTypeId || 0) === String(r.rootstockTypeId ?? 0)
+                        : (String(moveForm.fromRootstockTypeId || 0) === String(r.rootstockTypeId ?? 0) &&
+                           String(moveForm.varietyId || 0) === String(r.varietyId ?? 0) &&
+                           String(moveForm.seedlingTypeId || 0) === String(r.seedlingTypeId ?? 0));
                       return (
                       <button
                         key={i}
@@ -690,11 +751,11 @@ export default function GreenhouseStages() {
                           const isRootstockOnly = ["cassette", "grafting"].includes(f.fromStage);
                           return {
                             ...f,
-                            fromRootstockTypeId: r.rootstockTypeId ? String(r.rootstockTypeId) : "",
-                            rootstockTypeId: r.rootstockTypeId ? String(r.rootstockTypeId) : f.rootstockTypeId,
+                            fromRootstockTypeId: String(r.rootstockTypeId ?? 0),
+                            rootstockTypeId: r.rootstockTypeId ? String(r.rootstockTypeId) : "",
                             ...(isRootstockOnly ? {} : {
-                              varietyId: r.varietyId ? String(r.varietyId) : "",
-                              seedlingTypeId: r.seedlingTypeId ? String(r.seedlingTypeId) : "",
+                              varietyId: String(r.varietyId ?? 0),
+                              seedlingTypeId: String(r.seedlingTypeId ?? 0),
                             }),
                           };
                         })}
@@ -704,7 +765,7 @@ export default function GreenhouseStages() {
                           {r.seedlingTypeName ? ` · ${r.seedlingTypeName}` : ""}
                           {r.rootstockTypeName ? ` / ${r.rootstockTypeName}` : ""}
                         </span>
-                        <span className="font-bold text-yellow-800">{formatN(Math.round(r.quantity * sScale))} ta</span>
+                        <span className="font-bold text-yellow-800">{formatN(Math.round(r.quantity * stageScale))} ta</span>
                       </button>
                       );
                     })}
@@ -774,7 +835,7 @@ export default function GreenhouseStages() {
                   Payvant olmagan (qaytariladigan) soni
                 </Label>
                 <p className="text-xs text-amber-700">
-                  Bu miqdor <strong>KASETADA</strong> bosqichiga qaytariladi. Masalan: 1000 ta payvantlanmagan uchun olganda, 900 ta oldi, 100 ta olmadi → 100 ni kiriting.
+                  Bu miqdor <strong>{STAGE_LABELS[moveForm.fromStage] || moveForm.fromStage}</strong> bosqichida qoladi (chiqib ketmaydi). Masalan: 1000 ta payvantlanmagan uchun olganda, 900 ta oldi, 100 ta olmadi → 100 ni kiriting.
                 </p>
                 <Input
                   type="number"
@@ -810,6 +871,48 @@ export default function GreenhouseStages() {
                   />
                 </div>
               )}
+              {Number(moveForm.defectQuantity) > 0 && !isSourceLocation && (
+                <div className="space-y-1.5 pt-1">
+                  <Label className="text-xs text-red-700">
+                    Nobut rasmlari <span className="font-bold">*</span> (majburiy)
+                  </Label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="block w-full text-xs text-muted-foreground file:mr-2 file:rounded file:border-0 file:bg-red-100 file:px-2 file:py-1 file:text-xs file:font-medium file:text-red-700 hover:file:bg-red-200"
+                    onChange={async (e) => {
+                      const files = Array.from(e.target.files || []);
+                      const base64List = await Promise.all(
+                        files.map((file) => new Promise<string>((resolve, reject) => {
+                          const reader = new FileReader();
+                          reader.onload = (ev) => {
+                            // Canvas orqali JPEG ga o'tkazish — har qanday format ishlaydi
+                            const img = new Image();
+                            img.onload = () => {
+                              const canvas = document.createElement("canvas");
+                              canvas.width = img.width;
+                              canvas.height = img.height;
+                              const ctx = canvas.getContext("2d");
+                              if (!ctx) { resolve(ev.target?.result as string); return; }
+                              ctx.drawImage(img, 0, 0);
+                              resolve(canvas.toDataURL("image/jpeg", 0.85));
+                            };
+                            img.onerror = () => resolve(ev.target?.result as string);
+                            img.src = ev.target?.result as string;
+                          };
+                          reader.onerror = () => reject(new Error("Fayl o'qib bo'lmadi"));
+                          reader.readAsDataURL(file);
+                        }))
+                      );
+                      setMoveForm((f) => ({ ...f, defectImages: base64List }));
+                    }}
+                  />
+                  {moveForm.defectImages.length > 0 && (
+                    <p className="text-xs text-green-700">{moveForm.defectImages.length} ta rasm tanlandi</p>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -827,6 +930,10 @@ export default function GreenhouseStages() {
                 disabled={moveMutation.isPending || !moveForm.quantity || !moveForm.fromStage || !moveForm.toStage}
                 onClick={() => {
                   if (!activeLocationId) return;
+                  if (Number(moveForm.defectQuantity) > 0 && !isSourceLocation && moveForm.defectImages.length === 0) {
+                    toast.error("Nobut bo'lganlar uchun kamida 1 ta rasm yuklang");
+                    return;
+                  }
                   moveMutation.mutate({
                     locationId: activeLocationId,
                     fromStage: moveForm.fromStage,
@@ -835,11 +942,13 @@ export default function GreenhouseStages() {
                     failedQuantity: moveForm.failedQuantity ? Number(moveForm.failedQuantity) : 0,
                     defectQuantity: moveForm.defectQuantity ? Number(moveForm.defectQuantity) : 0,
                     defectNotes: moveForm.defectNotes || undefined,
+                    defectImages: moveForm.defectImages.length > 0 ? moveForm.defectImages : undefined,
                     actionDate: moveForm.actionDate,
                     notes: moveForm.notes || undefined,
                     seedlingTypeId: moveForm.seedlingTypeId ? Number(moveForm.seedlingTypeId) : undefined,
                     varietyId: moveForm.varietyId ? Number(moveForm.varietyId) : undefined,
                     rootstockTypeId: moveForm.rootstockTypeId ? Number(moveForm.rootstockTypeId) : undefined,
+                    fromRootstockTypeId: moveForm.fromRootstockTypeId && moveForm.fromRootstockTypeId !== "0" ? Number(moveForm.fromRootstockTypeId) : undefined,
                   });
                 }}
               >
@@ -973,6 +1082,181 @@ export default function GreenhouseStages() {
                 }}
               >
                 {receiveMutation.isPending ? "Kiritilmoqda..." : "Kiritish"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Teplitsaga bosqich bo'yicha o'tkazish dialogi */}
+      <Dialog open={isStageTransferDialogOpen} onOpenChange={setIsStageTransferDialogOpen}>
+        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Boshqa teplitsaga o'tkazish</DialogTitle>
+            <DialogDescription>
+              Bosqich va nav tanlang, so'ng maqsad teplitsa va miqdorni kiriting.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+
+            {/* Qaysi bosqich+navdan — visual panel */}
+            <div className="space-y-2">
+              <Label className="text-xs font-semibold text-yellow-800">Qaysi bosqich va navdan * (bosing tanlash uchun)</Label>
+              <div className="space-y-2">
+                {STAGES.map((stage) => {
+                  const stRows = (varietyStock || []).filter((r: any) => r.stage === stage && r.quantity > 0);
+                  const stActual = (stock?.[stage as keyof typeof stock] as number) || 0;
+                  if (stActual === 0) return null;
+                  const stVarTotal = stRows.reduce((s: number, r: any) => s + r.quantity, 0);
+                  const stScale = stVarTotal > stActual && stVarTotal > 0 ? stActual / stVarTotal : 1;
+                  return (
+                    <div key={stage} className={`rounded-lg border p-2 ${STAGE_COLORS[stage] || "border-border bg-muted/20"}`}>
+                      <p className="text-[11px] font-semibold mb-1.5 opacity-80">
+                        {STAGE_LABELS[stage]} — jami {formatN(stActual)} ta
+                      </p>
+                      <div className="space-y-1">
+                        {stRows.length > 0 ? stRows.map((r: any, i: number) => {
+                          const isSelected =
+                            stageTransferForm.fromStage === stage &&
+                            stageTransferForm.fromRootstockTypeId === String(r.rootstockTypeId ?? 0) &&
+                            stageTransferForm.fromVarietyId === String(r.varietyId ?? 0);
+                          return (
+                            <button
+                              key={i}
+                              type="button"
+                              className={`w-full flex items-center justify-between rounded px-2.5 py-1.5 text-xs border transition-colors ${
+                                isSelected
+                                  ? "border-primary bg-primary/10 font-semibold"
+                                  : "border-border/60 bg-background hover:bg-muted/40"
+                              }`}
+                              onClick={() => setStageTransferForm((f) => ({
+                                ...f,
+                                fromStage: stage,
+                                fromRootstockTypeId: String(r.rootstockTypeId ?? 0),
+                                fromVarietyId: String(r.varietyId ?? 0),
+                              }))}
+                            >
+                              <span>
+                                {r.varietyName || "Aniqlanmagan nav"}
+                                {r.rootstockTypeName ? ` / ${r.rootstockTypeName}` : ""}
+                              </span>
+                              <span className="font-bold">{formatN(Math.round(r.quantity * stScale))} ta</span>
+                            </button>
+                          );
+                        }) : (
+                          <button
+                            type="button"
+                            className={`w-full flex items-center justify-between rounded px-2.5 py-1.5 text-xs border transition-colors ${
+                              stageTransferForm.fromStage === stage
+                                ? "border-primary bg-primary/10 font-semibold"
+                                : "border-border/60 bg-background hover:bg-muted/40"
+                            }`}
+                            onClick={() => setStageTransferForm((f) => ({ ...f, fromStage: stage, fromRootstockTypeId: "0" }))}
+                          >
+                            <span>Barcha ko'chatlar</span>
+                            <span className="font-bold">{formatN(stActual)} ta</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Maqsad teplitsa */}
+            <div className="space-y-2">
+              <Label>Maqsad teplitsa *</Label>
+              <Select
+                value={stageTransferForm.toLocationId}
+                onValueChange={(v) => setStageTransferForm((f) => ({ ...f, toLocationId: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Tanlang..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {(allLocations || locations || [])
+                    .filter((loc) => loc.id !== activeLocationId && loc.type === "greenhouse")
+                    .map((loc) => (
+                      <SelectItem key={loc.id} value={String(loc.id)}>
+                        {loc.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Qaysi bosqichga */}
+            <div className="space-y-2">
+              <Label>Qaysi bosqichga *</Label>
+              <Select
+                value={stageTransferForm.toStage}
+                onValueChange={(v) => setStageTransferForm((f) => ({ ...f, toStage: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STAGES.map((s) => (
+                    <SelectItem key={s} value={s}>{STAGE_LABELS[s]}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Miqdor *</Label>
+              <Input
+                type="number"
+                min="1"
+                placeholder="Nechta o'tkaziladi"
+                value={stageTransferForm.quantity}
+                onChange={(e) => setStageTransferForm((f) => ({ ...f, quantity: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Sana</Label>
+              <Input
+                type="date"
+                value={stageTransferForm.actionDate}
+                onChange={(e) => setStageTransferForm((f) => ({ ...f, actionDate: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Izoh (ixtiyoriy)</Label>
+              <Textarea
+                rows={2}
+                placeholder="Sabab yoki eslatma..."
+                value={stageTransferForm.notes}
+                onChange={(e) => setStageTransferForm((f) => ({ ...f, notes: e.target.value }))}
+              />
+            </div>
+            <div className="flex justify-end gap-3 border-t pt-4">
+              <Button variant="outline" onClick={() => setIsStageTransferDialogOpen(false)}>Bekor qilish</Button>
+              <Button
+                disabled={
+                  stageTransferMutation.isPending ||
+                  !stageTransferForm.fromStage ||
+                  !stageTransferForm.toLocationId ||
+                  !stageTransferForm.quantity
+                }
+                onClick={() => {
+                  if (!activeLocationId) return;
+                  stageTransferMutation.mutate({
+                    locationId: activeLocationId,
+                    toLocationId: Number(stageTransferForm.toLocationId),
+                    fromStage: stageTransferForm.fromStage,
+                    toStage: stageTransferForm.toStage,
+                    quantity: Number(stageTransferForm.quantity),
+                    fromRootstockTypeId: stageTransferForm.fromRootstockTypeId && stageTransferForm.fromRootstockTypeId !== "0"
+                      ? Number(stageTransferForm.fromRootstockTypeId)
+                      : undefined,
+                    notes: stageTransferForm.notes || undefined,
+                    actionDate: stageTransferForm.actionDate || undefined,
+                  });
+                }}
+              >
+                {stageTransferMutation.isPending ? "O'tkazilmoqda..." : "O'tkazish"}
               </Button>
             </div>
           </div>
